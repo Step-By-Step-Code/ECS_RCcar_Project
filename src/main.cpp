@@ -1,13 +1,12 @@
 #include <Arduino.h>
 #include "PinChangeInterrupt.h"
 
-#define RED_PIN             9
-#define GREEN_PIN           10
-#define BLUE_PIN            11
+#define Brightness_PIN     5
+#define ONOFF_PIN          6
+#define COLOR_RED_PIN      9
+#define COLOR_GREEN_PIN    10
+#define COLOR_BLUE_PIN     11
 
-/* CH9 : LED ON/OFF [1800 < PWM : ON] [1800 > PWM : OFF] */
-/* CH2 : LED Brightness [PWM : MIN ~ MAX -> Brightness : 0 ~ 100] */
-/* CH1 : LED Color [PWM : MIN ~ MID ~ MAX -> COLOR : R < G > B] */
 #define pinRC9_ONOFF        A0
 #define pinRC2_Brightness   A1
 #define pinRC1_Color        A2 
@@ -48,9 +47,11 @@ void pwmRC1_Color();
 
 /* 초기 PIN I/O, PCINT, Serial Monitor 설정*/
 void setup() {
-  pinMode(RED_PIN,   OUTPUT);
-  pinMode(GREEN_PIN, OUTPUT);
-  pinMode(BLUE_PIN,  OUTPUT);
+  pinMode(ONOFF_PIN,   OUTPUT);
+  pinMode(Brightness_PIN, OUTPUT);
+  pinMode(COLOR_RED_PIN,   OUTPUT);
+  pinMode(COLOR_GREEN_PIN, OUTPUT);
+  pinMode(COLOR_BLUE_PIN,  OUTPUT);
   pinMode(pinRC9_ONOFF, INPUT_PULLUP);
   pinMode(pinRC2_Brightness, INPUT_PULLUP);
   pinMode(pinRC1_Color, INPUT_PULLUP);
@@ -99,52 +100,73 @@ void pwmRC1_Color() {
 /* LED Control */
 //---------------------------------------------------
 
-// LED Color 밝기 조절 변수
-volatile int ONOFF = 0;
-volatile int RED_Brightness = 0;
-volatile int GREEN_Brightness = 0;
-volatile int BLUE_Brightness = 0;
-volatile float LED_Brightness = 0;
+/* CH9 : LED ON/OFF [1800 < PWM : ON] [1800 > PWM : OFF] */
+/* CH2 : LED Brightness [PWM : MIN ~ MAX -> Brightness : 0 ~ 255] */
+/* CH1 : LED Color [PWM : MIN ~ MID ~ MAX -> COLOR : B < G > R] */
 
 /* PWM 값에 따른 ON/OFF 제어 */
 void LED_ONOFF_Control() {
   if (bNewRC9Pulse) {
     bNewRC9Pulse = false;
-    ONOFF = (nRC9PulseWidth > 1800) ? 1 : 0;
+    analogWrite(ONOFF_PIN, (nRC9PulseWidth > 1800) ? 255 : 0);
   }
 }
 
 /* PWM 값에 따른 밝기 제어 */
 void LED_Brightness_Control() {
-  if (bNewRC2Pulse) {
-    bNewRC2Pulse = false;
-    LED_Brightness = map(nRC2PulseWidth, PWM_MIN, PWM_MAX, 0, 100);
-  }
-}
+  if (!bNewRC2Pulse) return;
+  bNewRC2Pulse = false;
 
-/* PWM 값에 따른 색 변화 제어 */
-void LED_Color_Control() {
-  if (ONOFF == 0) {
-    // Turn off all LEDs if ONOFF is 0
-    analogWrite(RED_PIN, 0);
-    analogWrite(GREEN_PIN, 0);
-    analogWrite(BLUE_PIN, 0);
+  // 1) 데드존 처리
+  if (nRC2PulseWidth <= PWM_MIN + 15) {
+    analogWrite(Brightness_PIN, 0);
     return;
   }
 
+  // 2) 맵핑 + 클램프
+  int raw = map(nRC2PulseWidth, PWM_MIN, PWM_MAX, 0, 255);
+  int brightness = constrain(raw, 0, 255);
+  analogWrite(Brightness_PIN, brightness);
+}
+
+/*
+=== CH1: PWM 신호 범위별 LED 색상 제어 ===
+
+RED 구간 (PWM_MIN ~ COLOR_RED_MAX):
+  - PWM_MIN일 때 빨강 밝기 최대 (255)
+  - COLOR_RED_MAX일 때 빨강 밝기 최소 (0)
+
+GREEN 구간 (COLOR_GREEN_MIN ~ COLOR_GREEN_MAX):
+  * 상승 (COLOR_GREEN_MIN ~ COLOR_GREEN_MID):
+    - COLOR_GREEN_MIN일 때 초록 밝기 최소 (0)
+    - COLOR_GREEN_MID일 때 초록 밝기 최대 (255)
+  * 하강 (COLOR_GREEN_MID ~ COLOR_GREEN_MAX):
+    - COLOR_GREEN_MID일 때 초록 밝기 최대 (255)
+    - COLOR_GREEN_MAX일 때 초록 밝기 최소 (0)
+
+BLUE 구간 (COLOR_BLUE_MIN ~ PWM_MAX):
+  - COLOR_BLUE_MIN일 때 파랑 밝기 최소 (0)
+  - PWM_MAX일 때 파랑 밝기 최대 (255)
+
+analogWrite() 호출 시 각 색상 값을 0~255로 constrain 처리
+*/
+
+void LED_Color_Control() {
   if (bNewRC1Pulse) {
     bNewRC1Pulse = false;
+
+    int RED_Brightness = 0;
+    int GREEN_Brightness = 0;
+    int BLUE_Brightness = 0;
 
     if (nRC1PulseWidth <= COLOR_RED_MAX) { /* PWM <= COLOR_RED_MAX : RED  */
       RED_Brightness = map(nRC1PulseWidth, PWM_MIN, COLOR_RED_MAX, 255, 0);
       GREEN_Brightness = BLUE_Brightness = 0;
     } 
-    else if (nRC1PulseWidth <= COLOR_GREEN_MAX) { /* COLOR_GREEN_MIN <= PWM <= COLOR_GREEN_MAX : GREEN */
-      if (nRC1PulseWidth <= COLOR_GREEN_MID) {
-        GREEN_Brightness = map(nRC1PulseWidth, COLOR_GREEN_MIN, COLOR_GREEN_MID, 0, 255);
-      } else {
-        GREEN_Brightness = map(nRC1PulseWidth, COLOR_GREEN_MID, COLOR_GREEN_MAX, 255, 0);
-      }
+    else if (nRC1PulseWidth <= COLOR_GREEN_MAX) { 
+      GREEN_Brightness = (nRC1PulseWidth <= COLOR_GREEN_MID) 
+                         ? map(nRC1PulseWidth, COLOR_GREEN_MIN, COLOR_GREEN_MID, 0, 255)
+                         : map(nRC1PulseWidth, COLOR_GREEN_MID, COLOR_GREEN_MAX, 255, 0);
       RED_Brightness = BLUE_Brightness = 0;
     }
     else if (nRC1PulseWidth <= PWM_MAX) { /* PWM >= COLOR_BLUE_MIN : BLUE */
@@ -152,15 +174,10 @@ void LED_Color_Control() {
       GREEN_Brightness = RED_Brightness = 0;
     }
 
-    // LED_Brightness_Control() 에서 설정한 밝기를 적용
-    RED_Brightness   = (int)(RED_Brightness * LED_Brightness / 100);
-    GREEN_Brightness = (int)(GREEN_Brightness * LED_Brightness / 100);
-    BLUE_Brightness  = (int)(BLUE_Brightness * LED_Brightness / 100);
-
     // 제어 신호에 대한 결과를 적용
-    analogWrite(RED_PIN, constrain(RED_Brightness, 0, 255));
-    analogWrite(GREEN_PIN, constrain(GREEN_Brightness, 0, 255));
-    analogWrite(BLUE_PIN, constrain(BLUE_Brightness, 0, 255));
+    analogWrite(COLOR_RED_PIN, constrain(RED_Brightness, 0, 255));
+    analogWrite(COLOR_GREEN_PIN, constrain(GREEN_Brightness, 0, 255));
+    analogWrite(COLOR_BLUE_PIN, constrain(BLUE_Brightness, 0, 255));
   }
 }
 //---------------------------------------------------
